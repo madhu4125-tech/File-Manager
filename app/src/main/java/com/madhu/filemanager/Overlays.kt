@@ -7,6 +7,17 @@ import android.widget.VideoView
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -231,12 +242,7 @@ fun ImageViewer(vm: FmViewModel, v: Viewer.Images) {
             IconBtn("↗️", "Open with") { vm.openExternal(current.path, true) }
         }
         HorizontalPager(state = pager, modifier = Modifier.weight(1f).fillMaxWidth()) { page ->
-            AsyncImage(
-                model = File(v.items[page].path),
-                contentDescription = v.items[page].name,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxSize()
-            )
+            ZoomableImage(v.items[page])
         }
     }
 }
@@ -294,4 +300,63 @@ fun TextViewer(vm: FmViewModel, v: Viewer.TextDoc) {
             )
         }
     }
+}
+
+/**
+ * Pinch to zoom, drag to pan while zoomed, double-tap to zoom in/out.
+ * Single-finger drags are only consumed while zoomed in, so the pager can still swipe at normal size.
+ */
+@Composable
+fun ZoomableImage(item: FileItem) {
+    var scale by remember { mutableStateOf(1f) }
+    var offset by remember { mutableStateOf(Offset.Zero) }
+    var box by remember { mutableStateOf(IntSize.Zero) }
+
+    fun clampOffset(o: Offset, s: Float): Offset {
+        val mx = box.width * (s - 1f) / 2f
+        val my = box.height * (s - 1f) / 2f
+        return Offset(o.x.coerceIn(-mx, mx), o.y.coerceIn(-my, my))
+    }
+
+    AsyncImage(
+        model = File(item.path),
+        contentDescription = item.name,
+        contentScale = ContentScale.Fit,
+        modifier = Modifier
+            .fillMaxSize()
+            .onSizeChanged { box = it }
+            .pointerInput(Unit) {
+                detectTapGestures(onDoubleTap = {
+                    if (scale > 1f) {
+                        scale = 1f
+                        offset = Offset.Zero
+                    } else {
+                        scale = 2.5f
+                    }
+                })
+            }
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    do {
+                        val event = awaitPointerEvent()
+                        val pressed = event.changes.count { it.pressed }
+                        if (pressed >= 2 || scale > 1f) {
+                            val zoom = event.calculateZoom()
+                            val pan = event.calculatePan()
+                            val ns = (scale * zoom).coerceIn(1f, 6f)
+                            scale = ns
+                            offset = if (ns <= 1f) Offset.Zero else clampOffset(offset + pan, ns)
+                            event.changes.forEach { c -> if (c.positionChanged()) c.consume() }
+                        }
+                    } while (event.changes.any { it.pressed })
+                }
+            }
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+                translationX = offset.x
+                translationY = offset.y
+            }
+    )
 }

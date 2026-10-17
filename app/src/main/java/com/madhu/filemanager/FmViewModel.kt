@@ -42,6 +42,9 @@ class FmViewModel(app: Application) : AndroidViewModel(app) {
     var busy by mutableStateOf<String?>(null)
     var busyCancelable by mutableStateOf(false)
     var an by mutableStateOf<An?>(null)
+    var trash by mutableStateOf<List<TrashItem>?>(null)
+    var dups by mutableStateOf<List<DupGroup>?>(null)
+    var dupSel by mutableStateOf<Set<String>>(emptySet())
     var marks by mutableStateOf(
         prefs.getString("marks", "")!!.split("\n").filter { it.isNotBlank() }
     )
@@ -51,6 +54,7 @@ class FmViewModel(app: Application) : AndroidViewModel(app) {
     var sortKey by mutableStateOf(runCatching { SortKey.valueOf(prefs.getString("sortKey", "NAME")!!) }.getOrDefault(SortKey.NAME))
     var sortAsc by mutableStateOf(prefs.getBoolean("sortAsc", true))
     var showHidden by mutableStateOf(prefs.getBoolean("hidden", false))
+    var useTrash by mutableStateOf(prefs.getBoolean("useTrash", true))
     var dark by mutableStateOf(
         prefs.getBoolean(
             "dark",
@@ -102,6 +106,7 @@ class FmViewModel(app: Application) : AndroidViewModel(app) {
             .putBoolean("sortAsc", sortAsc)
             .putBoolean("hidden", showHidden)
             .putBoolean("dark", dark)
+            .putBoolean("useTrash", useTrash)
             .putString("marks", marks.joinToString("\n"))
             .apply()
     }
@@ -253,6 +258,7 @@ class FmViewModel(app: Application) : AndroidViewModel(app) {
 
     fun onBack(): Boolean {
         if (viewer != null) { closeViewer(); return true }
+        if (trash != null || dups != null) { closePanels(); return true }
         if (selection.isNotEmpty()) { selection = emptySet(); return true }
         if (searching) { closeSearch(); return true }
         if (results != null) { leaveResults(); return true }
@@ -370,9 +376,26 @@ class FmViewModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------------ operations
     fun confirmDelete(paths: List<String>) {
+        confirmDeleteThen(paths) { afterChange(paths) }
+    }
+
+    private fun confirmDeleteThen(paths: List<String>, then: () -> Unit) {
         val name = if (paths.size == 1) "“${File(paths[0]).name}”" else "${paths.size} items"
-        dialog = Dlg.Confirm("Delete $name?", "This cannot be undone.", "Delete", true) {
-            op("Deleting…", "Deleted", after = { afterChange(paths) }) { FileOps.delete(paths) }
+        val bin = useTrash
+        val msg = if (bin) "It will stay in the recycle bin for 30 days." else "This cannot be undone."
+        dialog = Dlg.Confirm("Delete $name?", msg, if (bin) "Move to bin" else "Delete", !bin) {
+            runDelete(paths, then)
+        }
+    }
+
+    private fun runDelete(paths: List<String>, then: () -> Unit) {
+        val bin = useTrash
+        op(
+            if (bin) "Moving to recycle bin…" else "Deleting…",
+            if (bin) "Moved to recycle bin" else "Deleted",
+            after = { then() }
+        ) {
+            if (bin) FileOps.moveToTrash(paths) else FileOps.delete(paths)
         }
     }
 
@@ -527,9 +550,135 @@ class FmViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun anDelete(path: String) {
-        dialog = Dlg.Confirm("Delete “${File(path).name}”?", "This cannot be undone.", "Delete", true) {
-            op("Deleting…", "Deleted", after = { an?.let { analyze(it.path) } }) { FileOps.delete(listOf(path)) }
+        confirmDeleteThen(listOf(path)) { an?.let { analyze(it.path) } }
+    }
+
+    // ------------------------------------------------- recycle bin and duplicates
+    fun closePanels() {
+        trash = null
+        dups = null
+        dupSel = emptySet()
+    }
+
+    fun openTrash() {
+        viewModelScope.launch {
+            try {
+                val l = withContext(Dispatchers.IO) {
+                    FileOps.purgeOldTrash(30)
+                    FileOps.listTrash()
+                }
+                dups = null
+                dupSel = emptySet()
+                trash = l
+            } catch (e: Exception) {
+                toast(e.message ?: "Cannot open the recycle bin")
+            }
         }
+    }
+
+    private fun reloadTrash() {
+        viewModelScope.launch {
+            try {
+                val l = withContext(Dispatchers.IO) { FileOps.listTrash() }
+                trash = l
+            } catch (e: Exception) {
+                toast(e.message ?: "Cannot read the recycle bin")
+            }
+        }
+    }
+
+    fun showTrashMenu() {
+        dialog = Dlg.Menu(
+            "Recycle bin",
+            listOf(MenuEntry("🧹", "Empty recycle bin", danger = true) { confirmEmptyTrash() })
+        )
+    }
+
+    fun showTrashItemMenu(t: TrashItem) {
+        dialog = Dlg.Menu(
+            t.name,
+            listOf(
+                MenuEntry("♻️", "Restore to original folder") { restoreTrashItem(t) },
+                MenuEntry("🗑️", "Delete forever", danger = true) { deleteTrashItem(t) }
+            )
+        )
+    }
+
+    private fun restoreTrashItem(t: TrashItem) {
+        op("Restoring…", "Restored", after = { reloadTrash() }) { FileOps.restoreTrash(t) }
+    }
+
+    private fun deleteTrashItem(t: TrashItem) {
+        dialog = Dlg.Confirm("Delete forever?", "“${t.name}” will be permanently deleted.", "Delete", true) {
+            op("Deleting…", "Deleted", after = { reloadTrash() }) { FileOps.deleteTrash(t) }
+        }
+    }
+
+    private fun confirmEmptyTrash() {
+        dialog = Dlg.Confirm("Empty recycle bin?", "Everything in it will be permanently deleted.", "Empty", true) {
+            op("Emptying…", "Recycle bin emptied", after = { reloadTrash() }) { FileOps.emptyTrash() }
+        }
+    }
+
+    fun findDuplicates() {
+        val root = volumes.firstOrNull()?.path ?: return
+        busy = "Looking for duplicate files… this can take a while"
+        busyCancelable = true
+        busyJob = viewModelScope.launch {
+            try {
+                val g = withContext(Dispatchers.IO) { FileOps.findDuplicates(File(root), 10L * 1024L) }
+                busy = null
+                trash = null
+                dupSel = emptySet()
+                dups = g
+            } catch (e: CancellationException) {
+                busy = null
+                throw e
+            } catch (e: Exception) {
+                busy = null
+                toast(e.message ?: "Scan failed")
+            }
+        }
+    }
+
+    fun dupToggle(path: String) {
+        dupSel = if (path in dupSel) dupSel - path else dupSel + path
+    }
+
+    /** Selects every copy except the oldest one in each set. */
+    fun dupAutoSelect() {
+        val g = dups ?: return
+        val extra = HashSet<String>()
+        for (group in g) for (f in group.items.drop(1)) extra.add(f.path)
+        dupSel = extra
+    }
+
+    fun dupClear() {
+        dupSel = emptySet()
+    }
+
+    fun dupDeleteSelected() {
+        val sel = dupSel.toList()
+        if (sel.isEmpty()) return
+        var freed = 0L
+        dups?.forEach { g -> freed += g.items.count { it.path in dupSel } * g.size }
+        val bin = useTrash
+        val msg = "Frees ${fmtSize(freed)}. " + if (bin) "They go to the recycle bin." else "This cannot be undone."
+        dialog = Dlg.Confirm("Delete ${sel.size} duplicate file${if (sel.size == 1) "" else "s"}?", msg, if (bin) "Move to bin" else "Delete", !bin) {
+            runDelete(sel) { removeFromDups(sel) }
+        }
+    }
+
+    private fun removeFromDups(paths: List<String>) {
+        val gone = paths.toSet()
+        val current = dups ?: return
+        val updated = ArrayList<DupGroup>()
+        for (g in current) {
+            val left = g.items.filter { it.path !in gone }
+            if (left.size > 1) updated.add(DupGroup(g.size, left))
+        }
+        dups = updated
+        dupSel = dupSel - gone
     }
 
     // ----------------------------------------------------------------- menus
@@ -548,6 +697,12 @@ class FmViewModel(app: Application) : AndroidViewModel(app) {
                 grid = !grid
                 savePrefs()
             }
+        }
+        e += MenuEntry("🗑️", "Recycle bin") { openTrash() }
+        e += MenuEntry("🧬", "Find duplicate files") { findDuplicates() }
+        e += MenuEntry("♻️", if (useTrash) "Recycle bin: ON (tap to turn off)" else "Recycle bin: OFF (tap to turn on)") {
+            useTrash = !useTrash
+            savePrefs()
         }
         e += MenuEntry(if (showHidden) "🙈" else "👁️", if (showHidden) "Hide hidden files" else "Show hidden files") {
             showHidden = !showHidden

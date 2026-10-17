@@ -148,3 +148,19 @@ fun fmtDate(ms: Long): String =
 
 fun fmtDateTime(ms: Long): String =
     DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(ms))
+
+const val TRASH_NAME = ".FM_Trash"
+
+class TrashItem(
+    val id: String,
+    val name: String,
+    val origPath: String,
+    val deletedAt: Long,
+    val size: Long,
+    val isDir: Boolean
+)
+
+/** A set of byte-identical files. items are sorted oldest first. */
+class DupGroup(val size: Long, val items: List<FileItem>) {
+    val wasted: Long get() = size * (items.size - 1)
+}

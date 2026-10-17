@@ -115,10 +115,18 @@ fun MainScreen(vm: FmViewModel) {
         TopBar(vm)
         PasteBar(vm)
         Box(Modifier.weight(1f).fillMaxWidth()) {
-            when (vm.tab) {
-                NavTab.FILES -> if (vm.results == null && vm.cwd == null) HomeScreen(vm) else FileListScreen(vm)
-                NavTab.CATS -> CategoriesScreen(vm)
-                NavTab.STORAGE -> StorageScreen(vm)
+            val trashList = vm.trash
+            val dupList = vm.dups
+            if (trashList != null) {
+                TrashScreen(vm, trashList)
+            } else if (dupList != null) {
+                DuplicatesScreen(vm, dupList)
+            } else {
+                when (vm.tab) {
+                    NavTab.FILES -> if (vm.results == null && vm.cwd == null) HomeScreen(vm) else FileListScreen(vm)
+                    NavTab.CATS -> CategoriesScreen(vm)
+                    NavTab.STORAGE -> StorageScreen(vm)
+                }
             }
         }
         BottomBar(vm)
@@ -144,6 +152,15 @@ fun TopBar(vm: FmViewModel) {
     ) {
         val results = vm.results
         when {
+            vm.trash != null -> {
+                IconBtn("←", "Back") { vm.closePanels() }
+                BarTitle("Recycle bin", Modifier.weight(1f))
+                IconBtn("⋮", "Menu") { vm.showTrashMenu() }
+            }
+            vm.dups != null -> {
+                IconBtn("←", "Back") { vm.closePanels() }
+                BarTitle("Duplicate files", Modifier.weight(1f))
+            }
             vm.selection.isNotEmpty() -> {
                 IconBtn("✕", "Cancel selection") { vm.clearSel() }
                 BarTitle("${vm.selection.size} selected", Modifier.weight(1f))
@@ -246,7 +263,7 @@ fun RowScope.SearchField(vm: FmViewModel) {
 fun PasteBar(vm: FmViewModel) {
     val p = LocalPal.current
     val c = vm.clip
-    if (c == null || vm.tab != NavTab.FILES || vm.results != null || vm.cwd == null || vm.selection.isNotEmpty()) return
+    if (c == null || vm.tab != NavTab.FILES || vm.results != null || vm.cwd == null || vm.selection.isNotEmpty() || vm.trash != null || vm.dups != null) return
     Row(
         Modifier.fillMaxWidth().background(p.accent).padding(horizontal = 14.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -279,9 +296,9 @@ fun BottomBar(vm: FmViewModel) {
             BarAction("🗑️", "Delete", p.danger) { vm.confirmDelete(paths) }
             BarAction("⋯", "More", p.text) { vm.showSelectionMore() }
         } else {
-            NavItem("📁", "Files", vm.tab == NavTab.FILES) { vm.tab = NavTab.FILES; vm.searching = false }
-            NavItem("🗂️", "Categories", vm.tab == NavTab.CATS) { vm.tab = NavTab.CATS; vm.searching = false }
-            NavItem("📊", "Storage", vm.tab == NavTab.STORAGE) { vm.tab = NavTab.STORAGE; vm.searching = false }
+            NavItem("📁", "Files", vm.tab == NavTab.FILES) { vm.tab = NavTab.FILES; vm.searching = false; vm.closePanels() }
+            NavItem("🗂️", "Categories", vm.tab == NavTab.CATS) { vm.tab = NavTab.CATS; vm.searching = false; vm.closePanels() }
+            NavItem("📊", "Storage", vm.tab == NavTab.STORAGE) { vm.tab = NavTab.STORAGE; vm.searching = false; vm.closePanels() }
         }
     }
 }
@@ -501,35 +518,38 @@ fun FileTile(vm: FmViewModel, item: FileItem) {
 
 // ------------------------------------------------------------- categories
 
+class HomeTile(val icon: String, val label: String, val color: Color, val onClick: () -> Unit)
+
 @Composable
 fun CategoriesScreen(vm: FmViewModel) {
     val p = LocalPal.current
+    val tiles: List<HomeTile> = CATS.map { c -> HomeTile(c.icon, c.label, c.color) { vm.runCategory(c) } } + listOf(
+        HomeTile("⬇️", "Downloads", Color(0xFF14213D)) {
+            vm.volumes.firstOrNull()?.let { v -> vm.navigate(v.path + "/Download") }
+        },
+        HomeTile("🧬", "Duplicates", Color(0xFF00897B)) { vm.findDuplicates() },
+        HomeTile("🗑️", "Recycle bin", Color(0xFF546E7A)) { vm.openTrash() }
+    )
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(10.dp)) {
-        val tiles: List<Triple<String, String, Color>> =
-            CATS.map { Triple(it.icon, it.label, it.color) } + Triple("⬇️", "Downloads", Color(0xFF14213D))
-        tiles.chunked(2).forEachIndexed { rowIdx, row ->
+        tiles.chunked(2).forEach { row ->
             Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                row.forEachIndexed { colIdx, (icon, label, color) ->
-                    val idx = rowIdx * 2 + colIdx
+                row.forEach { t ->
                     Row(
-                        Modifier.weight(1f).clip(RoundedCornerShape(14.dp)).background(p.surface).clickable {
-                            if (idx < CATS.size) vm.runCategory(CATS[idx])
-                            else vm.volumes.firstOrNull()?.let { vm.navigate(it.path + "/Download") }
-                        }.padding(16.dp),
+                        Modifier.weight(1f).clip(RoundedCornerShape(14.dp)).background(p.surface).clickable { t.onClick() }.padding(16.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Box(Modifier.size(44.dp).clip(RoundedCornerShape(12.dp)).background(color), contentAlignment = Alignment.Center) {
-                            Text(icon, fontSize = 22.sp)
+                        Box(Modifier.size(44.dp).clip(RoundedCornerShape(12.dp)).background(t.color), contentAlignment = Alignment.Center) {
+                            Text(t.icon, fontSize = 22.sp)
                         }
                         Spacer(Modifier.width(12.dp))
-                        Text(label, fontWeight = FontWeight.SemiBold, color = p.text, fontSize = 15.sp)
+                        Text(t.label, fontWeight = FontWeight.SemiBold, color = p.text, fontSize = 15.sp)
                     }
                 }
                 if (row.size == 1) Spacer(Modifier.weight(1f))
             }
         }
         Text(
-            "Categories scan your whole internal storage, so large phones can take a few seconds.",
+            "Categories and Duplicates scan your whole internal storage, so large phones can take a few seconds.",
             color = p.muted, fontSize = 12.5.sp, modifier = Modifier.padding(8.dp)
         )
     }
@@ -657,5 +677,118 @@ fun AnalysisView(vm: FmViewModel, a: An, d: AnalyzeResult) {
                 Box(Modifier.fillMaxWidth().height(1.dp).background(p.line))
             }
         }
+    }
+}
+
+// ------------------------------------------------------------ recycle bin
+
+@Composable
+fun TrashScreen(vm: FmViewModel, list: List<TrashItem>) {
+    val p = LocalPal.current
+    if (list.isEmpty()) {
+        Empty("🗑️", "The recycle bin is empty. Deleted files stay here for 30 days.")
+        return
+    }
+    LazyColumn(Modifier.fillMaxSize().padding(10.dp).clip(RoundedCornerShape(14.dp)).background(p.surface)) {
+        items(list, key = { it.id }) { t ->
+            val ico = FileItem(t.name, t.name, t.isDir, 0L, 0L).icon
+            Row(
+                Modifier.fillMaxWidth().clickable { vm.showTrashItemMenu(t) }
+                    .padding(start = 14.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(Modifier.size(42.dp).clip(RoundedCornerShape(10.dp)).background(p.bg), contentAlignment = Alignment.Center) {
+                    Text(ico, fontSize = 24.sp)
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(t.name, fontWeight = FontWeight.SemiBold, color = p.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("${fmtSize(t.size)} · deleted ${fmtDate(t.deletedAt)}", color = p.muted, fontSize = 12.5.sp, maxLines = 1)
+                    Text("From ${File(t.origPath).parent ?: ""}", color = p.muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                IconBtn("⋮", "Actions for ${t.name}", p.muted) { vm.showTrashItemMenu(t) }
+            }
+            Box(Modifier.fillMaxWidth().height(1.dp).background(p.line))
+        }
+    }
+}
+
+// -------------------------------------------------------------- duplicates
+
+@Composable
+fun DuplicatesScreen(vm: FmViewModel, groups: List<DupGroup>) {
+    val p = LocalPal.current
+    if (groups.isEmpty()) {
+        Empty("✨", "No duplicate files found (files under 10 KB are ignored).")
+        return
+    }
+    var wasted = 0L
+    groups.forEach { wasted += it.wasted }
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "${groups.size} sets · ${fmtSize(wasted)} can be freed",
+                Modifier.weight(1f), color = p.text, fontWeight = FontWeight.SemiBold, fontSize = 13.sp
+            )
+            Button(
+                onClick = { vm.dupAutoSelect() },
+                colors = ButtonDefaults.buttonColors(containerColor = p.accent, contentColor = p.accentInk)
+            ) { Text("Select extras", fontSize = 12.sp) }
+            Button(
+                onClick = { vm.dupClear() },
+                colors = ButtonDefaults.buttonColors(containerColor = p.surface, contentColor = p.text)
+            ) { Text("Clear", fontSize = 12.sp) }
+        }
+        LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
+            items(groups) { g -> DupGroupCard(vm, g) }
+        }
+        if (vm.dupSel.isNotEmpty()) {
+            Button(
+                onClick = { vm.dupDeleteSelected() },
+                colors = ButtonDefaults.buttonColors(containerColor = p.danger, contentColor = Color.White),
+                modifier = Modifier.fillMaxWidth().padding(10.dp)
+            ) { Text("Delete ${vm.dupSel.size} selected", fontWeight = FontWeight.Bold) }
+        }
+    }
+}
+
+@Composable
+fun DupGroupCard(vm: FmViewModel, g: DupGroup) {
+    val p = LocalPal.current
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 5.dp)
+            .clip(RoundedCornerShape(14.dp)).background(p.surface)
+    ) {
+        Text(
+            "${g.items.size} copies · ${fmtSize(g.size)} each · ${fmtSize(g.wasted)} wasted",
+            Modifier.padding(start = 14.dp, top = 10.dp, end = 14.dp, bottom = 4.dp),
+            fontWeight = FontWeight.Bold, color = p.text, fontSize = 13.sp
+        )
+        g.items.forEach { f ->
+            val on = f.path in vm.dupSel
+            Row(
+                Modifier.fillMaxWidth().background(if (on) p.sel else Color.Transparent)
+                    .clickable { vm.dupToggle(f.path) }
+                    .padding(start = 4.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                SelectDot(on)
+                Thumb(f, Modifier.size(40.dp))
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(f.name, fontWeight = FontWeight.SemiBold, color = p.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        "${File(f.path).parent ?: ""} · ${fmtDate(f.mtime)}",
+                        color = p.muted, fontSize = 11.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+                    )
+                }
+                IconBtn("👁️", "Preview ${f.name}", p.muted) { vm.openItem(f) }
+            }
+        }
+        Spacer(Modifier.height(6.dp))
     }
 }

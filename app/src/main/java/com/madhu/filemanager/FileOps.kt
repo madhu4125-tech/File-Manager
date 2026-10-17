@@ -21,6 +21,7 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.nio.file.Files
+import java.security.MessageDigest
 import java.util.Locale
 import java.util.PriorityQueue
 import java.util.zip.ZipEntry
@@ -276,6 +277,7 @@ object FileOps {
             val d = stack.removeLast()
             val kids = d.listFiles() ?: continue
             for (k in kids) {
+                if (k.name == TRASH_NAME) continue
                 val dir = k.isDirectory
                 if (dir && !Files.isSymbolicLink(k.toPath())) stack.addLast(k)
                 val nl = k.name.lowercase(Locale.ROOT)
@@ -396,5 +398,166 @@ object FileOps {
         }
         i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         ctx.startActivity(Intent.createChooser(i, "Share").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+
+    // ------------------------------------------------------------ recycle bin
+
+    fun trashRoot(): File = File(Environment.getExternalStorageDirectory(), TRASH_NAME)
+
+    private fun dirSize(d: File): Long {
+        var t = 0L
+        val kids = d.listFiles() ?: return 0L
+        for (k in kids) t += if (k.isDirectory) dirSize(k) else k.length()
+        return t
+    }
+
+    /** Moves each path into the bin as <id>/<name> plus an <id>.meta file recording where it came from. */
+    fun moveToTrash(paths: List<String>) {
+        val root = trashRoot()
+        if (!root.exists() && !root.mkdirs()) throw IOException("Cannot create the recycle bin")
+        var n = 0
+        for (p in paths) {
+            val f = File(p)
+            if (!f.exists()) continue
+            // Anything already inside the bin (or the bin itself) is deleted for good instead of nested.
+            val rootPath = root.canonicalPath
+            val fPath = f.canonicalPath
+            if (fPath == rootPath || fPath.startsWith(rootPath + File.separator)) {
+                if (!deleteRec(f)) throw IOException("Could not delete ${f.name}")
+                continue
+            }
+            val id = "${System.currentTimeMillis()}_$n"
+            n++
+            val dir = File(root, id)
+            if (!dir.mkdirs()) throw IOException("Cannot create the recycle bin")
+            val dst = File(dir, f.name)
+            if (!f.renameTo(dst)) {
+                copyRec(f, dir)
+                if (!deleteRec(f)) throw IOException("Could not remove ${f.name}")
+            }
+            File(root, "$id.meta").writeText(f.absolutePath + "\n" + System.currentTimeMillis(), Charsets.UTF_8)
+        }
+    }
+
+    fun listTrash(): List<TrashItem> {
+        val root = trashRoot()
+        val metas = root.listFiles()?.filter { it.isFile && it.name.endsWith(".meta") } ?: return emptyList()
+        val out = ArrayList<TrashItem>()
+        for (m in metas) {
+            val id = m.name.removeSuffix(".meta")
+            val inner = File(root, id).listFiles()?.firstOrNull() ?: continue
+            val text = runCatching { m.readText(Charsets.UTF_8) }.getOrNull() ?: continue
+            val lines = text.split("\n")
+            val orig = lines[0]
+            val at = lines.getOrNull(1)?.trim()?.toLongOrNull() ?: m.lastModified()
+            val size = if (inner.isDirectory) dirSize(inner) else inner.length()
+            out.add(TrashItem(id, inner.name, orig, at, size, inner.isDirectory))
+        }
+        out.sortByDescending { it.deletedAt }
+        return out
+    }
+
+    fun restoreTrash(item: TrashItem) {
+        val root = trashRoot()
+        val dir = File(root, item.id)
+        val inner = dir.listFiles()?.firstOrNull() ?: throw IOException("Item is missing from the recycle bin")
+        val target = File(item.origPath)
+        val parent = target.parentFile ?: throw IOException("Invalid original location")
+        if (!parent.exists() && !parent.mkdirs()) throw IOException("Cannot recreate ${parent.path}")
+        val dst = unique(parent, target.name)
+        if (!inner.renameTo(dst)) {
+            copyRec(inner, parent)
+            deleteRec(inner)
+        }
+        deleteRec(dir)
+        File(root, item.id + ".meta").delete()
+    }
+
+    fun deleteTrash(item: TrashItem) {
+        val root = trashRoot()
+        deleteRec(File(root, item.id))
+        File(root, item.id + ".meta").delete()
+    }
+
+    fun emptyTrash() {
+        val root = trashRoot()
+        root.listFiles()?.forEach { deleteRec(it) }
+    }
+
+    /** Permanently removes bin entries older than the given number of days. */
+    fun purgeOldTrash(days: Int) {
+        val cutoff = System.currentTimeMillis() - days * 86_400_000L
+        for (t in listTrash()) if (t.deletedAt < cutoff) deleteTrash(t)
+    }
+
+    // -------------------------------------------------------- duplicate finder
+
+    private suspend fun hashFile(f: File, limit: Long): String {
+        val md = MessageDigest.getInstance("SHA-256")
+        val buf = ByteArray(256 * 1024)
+        var total = 0L
+        FileInputStream(f).use { input ->
+            while (total < limit) {
+                currentCoroutineContext().ensureActive()
+                val want = minOf(buf.size.toLong(), limit - total).toInt()
+                val r = input.read(buf, 0, want)
+                if (r <= 0) break
+                md.update(buf, 0, r)
+                total += r
+            }
+        }
+        return md.digest().joinToString("") { b -> "%02x".format(b) }
+    }
+
+    /**
+     * Finds byte-identical files. Group by size, then by a hash of the first 64 KB,
+     * then (for larger files) by a full SHA-256, so most files are never read completely.
+     */
+    suspend fun findDuplicates(root: File, minSize: Long): List<DupGroup> {
+        val bySize = HashMap<Long, MutableList<File>>()
+        val stack = ArrayDeque<File>()
+        stack.addLast(root)
+        while (stack.isNotEmpty()) {
+            currentCoroutineContext().ensureActive()
+            val d = stack.removeLast()
+            val kids = d.listFiles() ?: continue
+            for (k in kids) {
+                if (k.isDirectory) {
+                    if (k.name != TRASH_NAME && !Files.isSymbolicLink(k.toPath())) stack.addLast(k)
+                } else {
+                    val len = k.length()
+                    if (len >= minSize) bySize.getOrPut(len) { mutableListOf() }.add(k)
+                }
+            }
+        }
+
+        val groups = ArrayList<DupGroup>()
+        for ((size, files) in bySize) {
+            if (files.size < 2) continue
+            val quick = HashMap<String, MutableList<File>>()
+            for (f in files) {
+                val h: String? = try { hashFile(f, 65536L) } catch (e: IOException) { null }
+                if (h != null) quick.getOrPut(h) { mutableListOf() }.add(f)
+            }
+            for (same in quick.values) {
+                if (same.size < 2) continue
+                val sets: List<List<File>>
+                if (size <= 65536L) {
+                    sets = listOf(same)
+                } else {
+                    val full = HashMap<String, MutableList<File>>()
+                    for (f in same) {
+                        val h: String? = try { hashFile(f, Long.MAX_VALUE) } catch (e: IOException) { null }
+                        if (h != null) full.getOrPut(h) { mutableListOf() }.add(f)
+                    }
+                    sets = full.values.filter { it.size > 1 }
+                }
+                for (g in sets) {
+                    groups.add(DupGroup(size, g.map { item(it) }.sortedBy { it.mtime }))
+                }
+            }
+        }
+        groups.sortByDescending { it.wasted }
+        return groups
     }
 }
