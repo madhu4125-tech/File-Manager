@@ -13,11 +13,12 @@ Fully native Android file manager. No WebView, no Capacitor, no Node.
 - Duplicate finder: groups identical files (size, then SHA-256), "select extras", delete to free space
 - Storage analyzer: usage by type, biggest folders (drill down), largest files
 - Open with / Share through any Android app
+- Share target: appears as "Save to File Manager" in Android's Share sheet; pick a folder and save the shared file
 - Dark mode
 
 ## Build with GitHub (no Android Studio)
 1. Create a repo and upload everything in this folder (keep `.github/workflows/build-apk.yml`).
-2. Actions tab > wait for the run, then download the artifact `file-manager-kotlin-apk` at the bottom of the run page.
+2. Actions tab > wait for the run, then download the artifact (named after your repo; it contains `<repo-name>.apk`) at the bottom of the run page.
 3. Unzip and install `app-debug.apk`. On first launch tap Grant access and switch on "All files access".
 
 Note: debug builds are signed with a throwaway key, so each new build must be installed after

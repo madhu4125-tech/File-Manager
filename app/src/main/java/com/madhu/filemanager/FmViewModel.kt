@@ -5,6 +5,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.res.Configuration
+import android.net.Uri
 import android.widget.Toast
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -45,6 +46,9 @@ class FmViewModel(app: Application) : AndroidViewModel(app) {
     var trash by mutableStateOf<List<TrashItem>?>(null)
     var dups by mutableStateOf<List<DupGroup>?>(null)
     var dupSel by mutableStateOf<Set<String>>(emptySet())
+    var incoming by mutableStateOf<List<Incoming>?>(null)
+    private var sharedLaunch = false
+    var onDone: (() -> Unit)? = null
     var marks by mutableStateOf(
         prefs.getString("marks", "")!!.split("\n").filter { it.isNotBlank() }
     )
@@ -174,6 +178,7 @@ class FmViewModel(app: Application) : AndroidViewModel(app) {
                 gate = false
                 volumes = FileOps.volumes(ctx)
             }
+            if (incoming != null && cwd == null) goToDefaultSaveFolder()
         } else {
             gate = true
         }
@@ -264,7 +269,83 @@ class FmViewModel(app: Application) : AndroidViewModel(app) {
         if (results != null) { leaveResults(); return true }
         if (tab != NavTab.FILES) { tab = NavTab.FILES; return true }
         if (cwd != null) { goUp(); return true }
+        if (incoming != null) { cancelIncoming(); return true }
         return false
+    }
+
+    // ------------------------------------------------- files shared to us
+    fun receiveShare(uris: List<Uri>, text: String?) {
+        viewModelScope.launch {
+            val list = withContext(Dispatchers.IO) {
+                val l = ArrayList<Incoming>()
+                for (u in uris) {
+                    val info = FileOps.queryIncoming(ctx, u)
+                    l.add(Incoming(info.first, info.second, u, null))
+                }
+                if (l.isEmpty() && !text.isNullOrEmpty()) {
+                    l.add(Incoming("Shared text.txt", text.length.toLong(), null, text))
+                }
+                l
+            }
+            if (list.isEmpty()) {
+                toast("Nothing to save")
+                return@launch
+            }
+            sharedLaunch = true
+            trash = null
+            dups = null
+            dupSel = emptySet()
+            results = null
+            searching = false
+            selection = emptySet()
+            incoming = list
+            if (!gate && volumes.isNotEmpty()) goToDefaultSaveFolder()
+        }
+    }
+
+    private fun goToDefaultSaveFolder() {
+        val base = volumes.firstOrNull()?.path ?: return
+        val d = File(base, "Download")
+        if (!d.exists()) d.mkdirs()
+        navigate(if (d.isDirectory) d.path else base)
+    }
+
+    fun saveIncomingHere() {
+        val list = incoming ?: return
+        val dest = cwd ?: return
+        if (results != null) return
+        var count = 0
+        op("Saving…", null, after = { ok ->
+            if (ok) {
+                toast(if (count == 1) "Saved to $dest" else "Saved $count files to $dest")
+                incoming = null
+                finishAfterShare()
+            } else {
+                navigate(dest, keep = true)
+            }
+        }) {
+            for (f in list) {
+                val u = f.uri
+                if (u != null) {
+                    FileOps.saveStream(ctx, u, File(dest), f.name)
+                } else {
+                    FileOps.saveText(File(dest), f.name, f.text ?: "")
+                }
+                count++
+            }
+        }
+    }
+
+    fun cancelIncoming() {
+        incoming = null
+        finishAfterShare()
+    }
+
+    private fun finishAfterShare() {
+        if (sharedLaunch) {
+            sharedLaunch = false
+            onDone?.invoke()
+        }
     }
 
     // ------------------------------------------------------------ selection

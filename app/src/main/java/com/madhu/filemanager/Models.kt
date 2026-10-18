@@ -1,5 +1,6 @@
 package com.madhu.filemanager
 
+import android.net.Uri
 import androidx.compose.ui.graphics.Color
 import java.text.DateFormat
 import java.util.Date
@@ -164,3 +165,6 @@ class TrashItem(
 class DupGroup(val size: Long, val items: List<FileItem>) {
     val wasted: Long get() = size * (items.size - 1)
 }
+
+/** A file (or text) another app shared to us and that the user is choosing a folder for. */
+class Incoming(val name: String, val size: Long, val uri: Uri?, val text: String?)

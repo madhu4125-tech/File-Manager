@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.provider.OpenableColumns
 import android.os.Build
 import android.os.Environment
 import android.os.StatFs
@@ -559,5 +560,54 @@ object FileOps {
         }
         groups.sortByDescending { it.wasted }
         return groups
+    }
+
+    // ------------------------------------------------- receiving shared files
+
+    /** Display name and size (-1 if unknown) of a shared content Uri. */
+    fun queryIncoming(ctx: Context, uri: Uri): Pair<String, Long> {
+        var name: String? = null
+        var size = -1L
+        try {
+            val cursor = ctx.contentResolver.query(uri, null, null, null, null)
+            if (cursor != null) {
+                cursor.use { c ->
+                    if (c.moveToFirst()) {
+                        val ni = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        val si = c.getColumnIndex(OpenableColumns.SIZE)
+                        if (ni >= 0 && !c.isNull(ni)) name = c.getString(ni)
+                        if (si >= 0 && !c.isNull(si)) size = c.getLong(si)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // fall back to the Uri itself below
+        }
+        var n: String = name ?: uri.lastPathSegment ?: "shared_file"
+        n = n.substringAfterLast('/').replace(Regex("[\\\\:*?\"<>|]"), "_").trim()
+        if (n.isEmpty()) n = "shared_file"
+        if (!n.contains('.')) {
+            val mime = ctx.contentResolver.getType(uri)
+            val ext = if (mime != null) MimeTypeMap.getSingleton().getExtensionFromMimeType(mime) else null
+            if (ext != null) n = "$n.$ext"
+        }
+        return n to size
+    }
+
+    fun saveStream(ctx: Context, uri: Uri, destDir: File, name: String): File {
+        if (!destDir.isDirectory) throw IOException("Destination folder not found")
+        val out = unique(destDir, name)
+        val input = ctx.contentResolver.openInputStream(uri) ?: throw IOException("Cannot read the shared file")
+        input.use { ins ->
+            BufferedOutputStream(FileOutputStream(out)).use { os -> ins.copyTo(os) }
+        }
+        return out
+    }
+
+    fun saveText(destDir: File, name: String, text: String): File {
+        if (!destDir.isDirectory) throw IOException("Destination folder not found")
+        val out = unique(destDir, name)
+        out.writeText(text, Charsets.UTF_8)
+        return out
     }
 }

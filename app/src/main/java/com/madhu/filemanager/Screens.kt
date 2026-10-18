@@ -113,6 +113,7 @@ fun Gate(onGrant: () -> Unit) {
 fun MainScreen(vm: FmViewModel) {
     Column(Modifier.fillMaxSize()) {
         TopBar(vm)
+        SaveBar(vm)
         PasteBar(vm)
         Box(Modifier.weight(1f).fillMaxWidth()) {
             val trashList = vm.trash
@@ -790,5 +791,44 @@ fun DupGroupCard(vm: FmViewModel, g: DupGroup) {
             }
         }
         Spacer(Modifier.height(6.dp))
+    }
+}
+
+// ------------------------------------------------- saving a shared file
+
+@Composable
+fun SaveBar(vm: FmViewModel) {
+    val p = LocalPal.current
+    val inc = vm.incoming ?: return
+    val canSave = vm.tab == NavTab.FILES && vm.results == null && vm.cwd != null && vm.trash == null && vm.dups == null
+    val label = if (inc.size == 1) inc[0].name else "${inc.size} files"
+    Column(Modifier.fillMaxWidth().background(p.accent).padding(horizontal = 14.dp, vertical = 8.dp)) {
+        Text(
+            "Save “$label” to…",
+            color = p.accentInk, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            if (canSave) "Folder: ${vm.cwd}" else "Open the folder where you want to save it",
+            color = p.accentInk.copy(alpha = 0.75f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+        )
+        Row(
+            Modifier.fillMaxWidth().padding(top = 6.dp),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "Cancel", color = p.accentInk, fontWeight = FontWeight.Bold,
+                modifier = Modifier.clip(RoundedCornerShape(16.dp)).clickable { vm.cancelIncoming() }
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "Save here", color = Color.White, fontWeight = FontWeight.Bold,
+                modifier = Modifier.clip(RoundedCornerShape(16.dp))
+                    .background(if (canSave) p.accentInk else p.accentInk.copy(alpha = 0.4f))
+                    .clickable(enabled = canSave) { vm.saveIncomingHere() }
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+            )
+        }
     }
 }
